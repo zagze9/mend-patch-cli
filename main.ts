@@ -53,12 +53,13 @@ function tierReplace(lines: string[], old: string[], fresh: string[], kinds: str
   const f = lead(lines[at] ?? ''), p = lead(old[0] ?? ''); const out: string[] = [];
   for (let j = 0; j < fresh.length; j++) {
     if (kinds[j] === ' ') out.push(lines[at + contextAt[j]!]!);
-    else { let x = fresh[j]!; if (tier === 2 && x.trim() && p && x.startsWith(p)) x = f + x.slice(p.length); out.push(x); }
+    else { let x = fresh[j]!; if (tier === 2 && x.trim() && x.startsWith(p)) x = f + x.slice(p.length); out.push(x); }
   }
   return out;
 }
 interface Hunk { a: number; o: string[]; n: string[]; kinds: string[]; contextAt: number[]; noNl: boolean }
 interface USection { old: string | null; neu: string | null; create: boolean; del: boolean; hunks: Hunk[] }
+function trimTail(x: Hunk): void { while (x.o.length && x.o.at(-1) === '' && x.n.at(-1) === '' && x.kinds.at(-1) === ' ') { x.o.pop(); x.n.pop(); x.kinds.pop(); x.contextAt.pop(); } }
 function stripPath(s: string): string | null {
   let p = s.split('\t')[0]!.trim(); if (p === '/dev/null') return null;
   if (p.startsWith('a/') || p.startsWith('b/')) p = p.slice(2); return p;
@@ -70,18 +71,18 @@ function parseUnified(lines: string[]): USection[] {
     const l = lines[i]!; const ln = i + 1;
     if (l.startsWith('diff --git ')) {
       const m = /^diff --git a\/(.+) b\/(.+)$/.exec(l); if (!m) throw new Exit2(`error: parse ${ln}`);
-      if (h) while (h.o.length && h.o.at(-1) === '' && h.n.at(-1) === '' && h.kinds.at(-1) === ' ') { h.o.pop(); h.n.pop(); h.kinds.pop(); h.contextAt.pop(); }
+      if (h) trimTail(h);
       cur = start(m[1]!, m[2]!); h = null; continue;
     }
     if (l.startsWith('--- ') && (lines[i + 1] ?? '').startsWith('+++ ')) {
-      if (h) while (h.o.length && h.o.at(-1) === '' && h.n.at(-1) === '' && h.kinds.at(-1) === ' ') { h.o.pop(); h.n.pop(); h.kinds.pop(); h.contextAt.pop(); }
+      if (h) trimTail(h);
       const old = stripPath(l.slice(4)), neu = stripPath(lines[++i]!.slice(4));
       if (!cur || cur.hunks.length) cur = start(old, neu); else { cur.old = old; cur.neu = neu; }
       h = null; continue;
     }
     if (l.startsWith('--- ') && cur && !cur.hunks.length) throw new Exit2(`error: parse ${ln + 1}`);
     if (l.startsWith('@@')) {
-      if (h) while (h.o.length && h.o.at(-1) === '' && h.n.at(-1) === '' && h.kinds.at(-1) === ' ') { h.o.pop(); h.n.pop(); h.kinds.pop(); h.contextAt.pop(); }
+      if (h) trimTail(h);
       const m = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(l);
       if (!cur || !m) throw new Exit2(`error: parse ${ln}`);
       h = { a: Number(m[1]), o: [], n: [], kinds: [], contextAt: [], noNl: false }; cur.hunks.push(h); continue;
@@ -95,7 +96,7 @@ function parseUnified(lines: string[]): USection[] {
         if (mark === ' ' || mark === '+') { h.n.push(text); h.kinds.push(mark); h.contextAt.push(mark === ' ' ? h.o.length - 1 : -1); }
         if (mark === '\\') h.noNl = true; continue;
       }
-      h = null;
+      trimTail(h); h = null;
       if (l.startsWith('rename from ')) cur.old = l.slice(12);
       else if (l.startsWith('rename to ')) cur.neu = l.slice(10);
       else if (l.startsWith('new file mode')) cur.create = true;
@@ -109,6 +110,7 @@ function parseUnified(lines: string[]): USection[] {
       else if (l.startsWith('new file mode')) cur.create = true; else cur.del = true;
     }
   }
+  if (h) trimTail(h);
   return secs;
 }
 function unifiedEdit(s: USection, strict: boolean): Edit {
@@ -174,6 +176,11 @@ function searchEdits(lines: string[], strict: boolean): Edit[] {
 interface VChunk { anchor: string | null; end: boolean; old: string[]; neu: string[]; kinds: string[]; contextAt: number[] }
 interface VSection { op: 'add'|'delete'|'update'; path: string; move: string | null; add: string[]; chunks: VChunk[]; line: number }
 function parseV4a(lines: string[]): VSection[] {
+  const trimSec = (s: VSection) => {
+    if (s.op === 'add') while (s.add.length && s.add.at(-1) === '') s.add.pop();
+    const c = s.chunks.at(-1);
+    while (c && c.old.length && c.old.at(-1) === '' && c.neu.at(-1) === '' && c.kinds.at(-1) === ' ') { c.old.pop(); c.neu.pop(); c.kinds.pop(); c.contextAt.pop(); }
+  };
   const first = lines.findIndex((x) => !blank(x)); let last = lines.length - 1; while (last >= 0 && blank(lines[last]!)) last--;
   if (first < 0 || lines[first]!.trim() !== '*** Begin Patch') throw new Exit2(`error: parse ${first < 0 ? 1 : first + 1}`);
   if (last <= first || lines[last]!.trim() !== '*** End Patch') throw new Exit2(`error: parse ${lines.length + 1}`);
@@ -181,9 +188,9 @@ function parseV4a(lines: string[]): VSection[] {
   const finish = () => { if (sec && chunk) sec.chunks.push(chunk); chunk = null; };
   for (let i = first + 1; i < last; i++) {
     const l = lines[i]!, ln = i + 1; const m = /^\*\*\* (Add File|Delete File|Update File):\s*(.*?)\s*$/.exec(l);
-    if (m) { finish(); sec = { op: m[1] === 'Add File' ? 'add' : m[1] === 'Delete File' ? 'delete' : 'update', path: m[2]!, move: null, add: [], chunks: [], line: ln }; out.push(sec); continue; }
-    if (blank(l) && !chunk) continue; if (!sec) throw new Exit2(`error: parse ${ln}`);
-    if (sec.op === 'add') { if (l === '') continue; if (l.startsWith('+')) sec.add.push(l.slice(1)); else throw new Exit2(`error: parse ${ln}`); continue; }
+    if (m) { finish(); if (sec) trimSec(sec); sec = { op: m[1] === 'Add File' ? 'add' : m[1] === 'Delete File' ? 'delete' : 'update', path: m[2]!, move: null, add: [], chunks: [], line: ln }; out.push(sec); continue; }
+    if (blank(l) && !chunk) { if (sec && sec.op === 'add') sec.add.push(''); continue; } if (!sec) throw new Exit2(`error: parse ${ln}`);
+    if (sec.op === 'add') { if (l.startsWith('+')) sec.add.push(l.slice(1)); else throw new Exit2(`error: parse ${ln}`); continue; }
     if (sec.op === 'delete') throw new Exit2(`error: parse ${ln}`);
     if (!chunk && l.startsWith('*** Move to: ')) { sec.move = l.slice(13).trim(); continue; }
     if (l === '*** End of File') { if (!chunk) chunk = { anchor: null, end: true, old: [], neu: [], kinds: [], contextAt: [] }; chunk.end = true; finish(); continue; }
@@ -195,7 +202,7 @@ function parseV4a(lines: string[]): VSection[] {
     else if (l[0] === '+') { chunk.neu.push(l.slice(1)); chunk.kinds.push('+'); chunk.contextAt.push(-1); }
     else throw new Exit2(`error: parse ${ln}`);
   }
-  finish(); for (const s of out) if (s.op === 'update' && !s.chunks.length && s.move === null) throw new Exit2(`error: parse ${s.line}`);
+  finish(); if (sec) trimSec(sec); for (const s of out) if (s.op === 'update' && !s.chunks.length && s.move === null) throw new Exit2(`error: parse ${s.line}`);
   if (!out.length) throw new Exit2(`error: parse ${first + 1}`); return out;
 }
 function v4aEdit(s: VSection, strict: boolean): Edit {
@@ -223,7 +230,7 @@ function v4aEdit(s: VSection, strict: boolean): Edit {
         if (!valid.length) throw new Fail('no-match', s.path);
         at = valid[0]!; tier = found.tier;
       }
-      if (c.end) at = a.length;
+      if (c.end && !c.old.length) at = a.length;
       const rep = tierReplace(a, c.old, c.neu, c.kinds, c.contextAt, at, tier); a.splice(at, c.old.length, ...rep); cursor = at + rep.length;
     }
     const result = joinFile(a, f.br, f.ends);
